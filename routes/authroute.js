@@ -128,40 +128,48 @@ function hashResetOtp(userId, otp) {
 }
 
 async function sendResetOtp(email, name, otp) {
-  const { MAIL_HOST, MAIL_USER, MAIL_PASS } = process.env;
+  const { MAIL_HOST, MAIL_USER, MAIL_PASS, MAIL_PORT, MAIL_SECURE, MAIL_FROM, NODE_ENV,} = process.env;
+
   if (!MAIL_HOST || !MAIL_USER || !MAIL_PASS) {
-    if (process.env.NODE_ENV === "production") {
+    if (NODE_ENV === "production") {
       throw new Error("SMTP email configuration is missing.");
     }
-
-    console.warn(`[DEV ONLY] Password reset OTP for ${email}: ${otp}`);
-
+    console.warn(`[DEV ONLY] Password reset OTP generated for ${email}.`);
     return;
   }
 
   const transporter = nodemailer.createTransport({
     host: MAIL_HOST,
-    port: Number(process.env.MAIL_PORT || 587),
-    secure: process.env.MAIL_SECURE === "true",
+    port: Number(MAIL_PORT || 587),
+    secure: MAIL_SECURE === "true",
     auth: {
       user: MAIL_USER,
       pass: MAIL_PASS,
     },
+    family: 4,
+    connectionTimeout: 15000,
+    greetingTimeout: 15000,
+    socketTimeout: 20000,
   });
 
-  await transporter.sendMail({
-    from: process.env.MAIL_FROM || MAIL_USER,
-    to: email,
-    subject: "Employee Portal - Password Reset Code",
-    text: [
-      `Hello ${name || "there"},`,
-      "",
-      `Your password reset code is: ${otp}`,
-      "",
-      "This code expires in 10 minutes.",
-      "If you did not request this, you can ignore this email.",
-    ].join("\n"),
-  });
+  try {
+    await transporter.sendMail({
+      from: MAIL_FROM || MAIL_USER,
+      to: email,
+      subject: "Employee Portal - Password Reset Code",
+
+      text: [
+        `Hello ${name || "there"},`,
+        "",
+        `Your password reset code is: ${otp}`,
+        "",
+        "This code expires in 10 minutes.",
+        "If you did not request this, you can ignore this email.",
+      ].join("\n"),
+    });
+  } finally {
+    transporter.close();
+  }
 }
 
 router.post("/forgot-password", async (req, res) => {

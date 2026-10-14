@@ -60,3 +60,81 @@ CREATE TABLE IF NOT EXISTS password_reset_codes (
         REFERENCES users(id)
         ON DELETE CASCADE
 );
+
+USE react_demo_sql;
+
+CREATE TABLE IF NOT EXISTS device (
+    dev_id VARCHAR(30) NOT NULL,
+    name VARCHAR(150) NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    PRIMARY KEY (dev_id)
+);
+
+CREATE TABLE IF NOT EXISTS equipment (
+    equ_id VARCHAR(30) NOT NULL,
+    name VARCHAR(150) NOT NULL,
+    dev_id VARCHAR(30) NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    PRIMARY KEY (equ_id),
+
+    CONSTRAINT fk_equipment_device
+        FOREIGN KEY (dev_id)
+        REFERENCES device(dev_id)
+);
+
+CREATE TABLE IF NOT EXISTS equipment_log_data (
+    log_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    equ_id VARCHAR(30) NOT NULL,
+    dev_id VARCHAR(30) NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    PRIMARY KEY (log_id),
+
+    CONSTRAINT fk_log_equipment
+        FOREIGN KEY (equ_id)
+        REFERENCES equipment(equ_id),
+
+    CONSTRAINT fk_log_device
+        FOREIGN KEY (dev_id)
+        REFERENCES device(dev_id),
+
+    INDEX idx_log_equipment_created (equ_id, created_at),
+    INDEX idx_log_device_created (dev_id, created_at)
+);
+
+USE react_demo_sql;
+
+DROP TRIGGER IF EXISTS after_equipment_insert;
+
+DELIMITER $$
+
+CREATE TRIGGER after_equipment_insert
+AFTER INSERT ON equipment
+FOR EACH ROW
+BEGIN
+    INSERT INTO equipment_log_data (
+        equ_id,
+        dev_id,
+        created_at
+    )
+    VALUES (
+        NEW.equ_id,
+        NEW.dev_id,
+        NEW.created_at
+    );
+END$$
+
+DELIMITER ;
+
+
+USE react_demo_sql;
+
+ALTER TABLE equipment_log_data
+    ADD COLUMN pmtwofive DECIMAL(6,2) NULL,
+    ADD COLUMN tvoc DECIMAL(6,2) NULL,
+    ADD COLUMN temp DECIMAL(6,2) NULL,
+    ADD COLUMN hum DECIMAL(5,2) NULL,
+    ADD COLUMN cotwo DECIMAL(6,2) NULL,
+    ADD COLUMN pmten DECIMAL(6,2) NULL;

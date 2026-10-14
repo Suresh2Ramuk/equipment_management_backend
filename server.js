@@ -11,8 +11,29 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 
 app.use(cors());
-
 app.use(express.json());
+
+app.use("/api/auth", require("./routes/authroute"));
+
+app.use("/api/devices", require("./routes/deviceRoutes"));
+app.use("/api/equipment", require("./routes/equipmentRoutes"));
+app.use("/api/equipment-logs", require("./routes/equipmentLogRoutes"));
+// app.use(  "/api/equipment-logs",  require("./routes/equipmentLogRoutes"));
+app.use("/api/dashboard", require("./routes/dashboardRoutes"));
+app.use("/api/details", detailsRoutes);
+
+app.use((req, res) => {
+  res.status(404).json({
+    message: "API endpoint not found.",
+  });
+});
+
+app.use((error, req, res, next) => {
+  console.error("Unhandled error:", error);
+  res.status(500).json({
+    message: "Internal server error.",
+  });
+});
 
 app.get("/", (req, res) => {
   res.json({
@@ -38,29 +59,10 @@ app.get("/api/health", async (req, res) => {
   }
 });
 
-app.use("/api/auth", authRoutes);
-app.use("/api/details", detailsRoutes);
-
-app.use((req, res) => {
-  res.status(404).json({
-    message: "API endpoint not found.",
-  });
-});
-
-app.use((error, req, res, next) => {
-  console.error("Unhandled error:", error);
-
-  res.status(500).json({
-    message: "Internal server error.",
-  });
-});
-
 async function startServer() {
   try {
     await pool.query("SELECT 1");
-
     console.log("MySQL database connected.");
-
     app.listen(PORT, () => {
       console.log(`Server running at http://localhost:${PORT}`);
     });
