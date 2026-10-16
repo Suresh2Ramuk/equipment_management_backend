@@ -4,16 +4,63 @@ const crypto = require("crypto");
 const nodemailer = require("nodemailer");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
-
+const authenticateToken = require("../middleware/authmiddleware");
 const router = express.Router();
+
+router.get("/me", authenticateToken, async (req, res) => {
+  try {
+    const [permissionRows] = await pool.execute(
+      `SELECT p.permission_key
+       FROM role_permissions rp
+       INNER JOIN permissions p
+         ON p.id = rp.permission_id
+       WHERE rp.role_id = ?
+       ORDER BY p.permission_key`,
+      [req.user.role_id],
+    );
+
+    const permissions = permissionRows.map((row) => row.permission_key);
+
+    return res.status(200).json({
+      user: {
+        id: req.user.id,
+        name: req.user.name,
+        email: req.user.email,
+        role_id: req.user.role_id,
+        role: req.user.role,
+        permissions,
+      },
+      permissions,
+    });
+  } catch (error) {
+    console.error("Get current user error:", error.message);
+
+    return res.status(500).json({
+      message: "Unable to fetch current user.",
+    });
+  }
+});
 
 router.post("/register", async (req, res) => {
   try {
-    const { name, email, password } = req.body;
+    const { name, email, password } = req.body ?? {};
 
-    if (!name || !email || !password) {
+    if (
+      typeof name !== "string" ||
+      !name.trim() ||
+      typeof email !== "string" ||
+      !email.trim() ||
+      typeof password !== "string" ||
+      !password
+    ) {
       return res.status(400).json({
-        message: "All fields are required.",
+        message: "Name, email and password are required.",
+      });
+    }
+
+    if (name.trim().length < 3) {
+      return res.status(400).json({
+        message: "Name must be at least 3 characters long.",
       });
     }
 
@@ -24,71 +71,132 @@ router.post("/register", async (req, res) => {
     }
 
     const normalizedEmail = email.trim().toLowerCase();
-
-    const [existingUser] = await pool.query(
-      "SELECT id FROM users WHERE email = ?",
+    const [existingUsers] = await pool.execute(
+      "SELECT id FROM users WHERE email = ? LIMIT 1",
       [normalizedEmail],
     );
 
-    if (existingUser.length > 0) {
-      return res.status(400).json({
-        message: "Email already exists.",
+    if (existingUsers.length > 0) {
+      return res.status(409).json({ message: "Email already exists." });
+    }
+
+    // Never accept role_id from public registration input. All new accounts
+    // receive the viewer role selected by role name, not a hard-coded ID.
+    const [viewerRoles] = await pool.execute(
+      "SELECT id FROM roles WHERE name = 'viewer' LIMIT 1",
+    );
+
+    if (viewerRoles.length === 0) {
+      console.error("Registration failed: the viewer role is missing.");
+      return res.status(500).json({
+        message:
+          "Registration is not configured. Please contact an administrator.",
       });
     }
 
+    const viewerRoleId = Number(viewerRoles[0].id);
     const passwordHash = await bcrypt.hash(password, 10);
 
-    await pool.query(
-      "INSERT INTO users (name, email, password_hash) VALUES (?, ?, ?)",
-      [name.trim(), normalizedEmail, passwordHash],
-    );
+    try {
+      const [result] = await pool.execute(
+        `INSERT INTO users (name, email, password_hash, role_id, is_active)
+         VALUES (?, ?, ?, ?, 1)`,
+        [name.trim(), normalizedEmail, passwordHash, viewerRoleId],
+      );
 
-    res.status(201).json({
-      message: "User registered successfully.",
-    });
+      return res.status(201).json({
+        message: "User registered successfully.",
+        user: {
+          id: Number(result.insertId),
+          name: name.trim(),
+          email: normalizedEmail,
+          role_id: viewerRoleId,
+          role: "viewer",
+          is_active: true,
+        },
+      });
+    } catch (insertError) {
+      // Handles two registration requests arriving for the same email.
+      if (insertError.code === "ER_DUP_ENTRY") {
+        return res.status(409).json({ message: "Email already exists." });
+      }
+      throw insertError;
+    }
   } catch (error) {
-    console.error("Registration error:", error);
-    res.status(500).json({
-      message: "Internal server error.",
-    });
+    console.error("Registration error:", error.message);
+    return res
+      .status(500)
+      .json({ message: "Unable to register this account." });
   }
 });
 
 router.post("/login", async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { email, password } = req.body ?? {};
 
-    if (!email || !password) {
+    if (
+      typeof email !== "string" ||
+      !email.trim() ||
+      typeof password !== "string" ||
+      !password
+    ) {
       return res.status(400).json({
         message: "Email and password are required.",
       });
     }
 
     const normalizedEmail = email.trim().toLowerCase();
-
-    const [users] = await pool.query(
-      "SELECT id, name, email, password_hash FROM users WHERE email = ?",
+    const [users] = await pool.execute(
+      `SELECT u.id, u.name, u.email, u.password_hash, u.role_id,
+              u.is_active, u.last_login_at, r.name AS role
+       FROM users u
+       INNER JOIN roles r ON r.id = u.role_id
+       WHERE u.email = ?
+       LIMIT 1`,
       [normalizedEmail],
     );
 
     if (users.length === 0) {
-      return res.status(401).json({
-        message: "Invalid email or password.",
-      });
+      return res.status(401).json({ message: "Invalid email or password." });
     }
 
     const user = users[0];
     const passwordMatch = await bcrypt.compare(password, user.password_hash);
-
     if (!passwordMatch) {
-      return res.status(401).json({
-        message: "Invalid email or password.",
+      return res.status(401).json({ message: "Invalid email or password." });
+    }
+
+    // Check status at login as well as in authenticateToken middleware.
+    if (Number(user.is_active) !== 1) {
+      return res.status(403).json({
+        message: "This account is disabled. Please contact an administrator.",
       });
     }
 
+    // This was missing from the previous login route. Record successful login
+    // in the database; never update the timestamp for a failed login attempt.
+    const [loginUpdate] = await pool.execute(
+      `UPDATE users
+       SET last_login_at = CURRENT_TIMESTAMP
+       WHERE id = ? AND is_active = 1`,
+      [user.id],
+    );
+
+    if (loginUpdate.affectedRows !== 1) {
+      return res.status(403).json({
+        message:
+          "This account is unavailable. Please contact an administrator.",
+      });
+    }
+
+    const [timestampRows] = await pool.execute(
+      "SELECT last_login_at FROM users WHERE id = ? LIMIT 1",
+      [user.id],
+    );
+
     const token = jwt.sign(
       {
-        userId: user.id,
+        userId: Number(user.id),
         name: user.name,
         email: user.email,
       },
@@ -98,20 +206,22 @@ router.post("/login", async (req, res) => {
       },
     );
 
-    res.json({
+    return res.json({
       message: "Login successful.",
       token,
       user: {
-        id: user.id,
+        id: Number(user.id),
         name: user.name,
         email: user.email,
+        role_id: Number(user.role_id),
+        role: user.role,
+        is_active: true,
+        last_login_at: timestampRows[0]?.last_login_at ?? null,
       },
     });
   } catch (error) {
-    console.error("Login error:", error);
-    res.status(500).json({
-      message: "Unable to login.",
-    });
+    console.error("Login error:", error.message);
+    return res.status(500).json({ message: "Unable to login." });
   }
 });
 
@@ -128,7 +238,15 @@ function hashResetOtp(userId, otp) {
 }
 
 async function sendResetOtp(email, name, otp) {
-  const { MAIL_HOST, MAIL_USER, MAIL_PASS, MAIL_PORT, MAIL_SECURE, MAIL_FROM, NODE_ENV,} = process.env;
+  const {
+    MAIL_HOST,
+    MAIL_USER,
+    MAIL_PASS,
+    MAIL_PORT,
+    MAIL_SECURE,
+    MAIL_FROM,
+    NODE_ENV,
+  } = process.env;
 
   if (!MAIL_HOST || !MAIL_USER || !MAIL_PASS) {
     if (NODE_ENV === "production") {

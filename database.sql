@@ -138,3 +138,212 @@ ALTER TABLE equipment_log_data
     ADD COLUMN hum DECIMAL(5,2) NULL,
     ADD COLUMN cotwo DECIMAL(6,2) NULL,
     ADD COLUMN pmten DECIMAL(6,2) NULL;
+
+-- Equipment Manager RBAC migration
+-- BACK UP react_demo_sql BEFORE RUNNING.
+-- Run this migration ONCE. The ALTER TABLE statements are not repeatable.
+
+USE react_demo_sql;
+
+CREATE TABLE IF NOT EXISTS roles (
+    id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(50) NOT NULL UNIQUE,
+    description VARCHAR(255) NOT NULL DEFAULT '',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS permissions (
+    id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    permission_key VARCHAR(100) NOT NULL UNIQUE,
+    description VARCHAR(255) NOT NULL DEFAULT ''
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS role_permissions (
+    role_id INT NOT NULL,
+    permission_id INT NOT NULL,
+    PRIMARY KEY (role_id, permission_id),
+    CONSTRAINT fk_role_permissions_role
+        FOREIGN KEY (role_id) REFERENCES roles(id) ON DELETE CASCADE,
+    CONSTRAINT fk_role_permissions_permission
+        FOREIGN KEY (permission_id) REFERENCES permissions(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+INSERT INTO roles (name, description) VALUES
+    ('admin', 'Full access, including user and role administration'),
+    ('manager', 'Operational access to devices, equipment, logs and analytics'),
+    ('viewer', 'Read-only access to operational pages')
+ON DUPLICATE KEY UPDATE description = VALUES(description);
+
+INSERT INTO permissions (permission_key, description) VALUES
+    ('dashboard.view', 'View the dashboard summary'),
+    ('devices.view', 'View devices'),
+    ('devices.create', 'Create devices'),
+    ('devices.update', 'Update devices'),
+    ('devices.delete', 'Delete devices'),
+    ('equipment.view', 'View equipment'),
+    ('equipment.create', 'Create equipment'),
+    ('equipment.update', 'Update equipment'),
+    ('equipment.delete', 'Delete equipment'),
+    ('logs.view', 'View equipment sensor logs'),
+    ('logs.create', 'Submit sensor readings'),
+    ('analytics.view', 'View sensor analytics and charts'),
+    ('users.view', 'View and monitor registered users'),
+    ('users.manage_roles', 'Assign user roles and edit role permissions'),
+    ('users.manage_status', 'Enable and disable user accounts')
+ON DUPLICATE KEY UPDATE description = VALUES(description);
+
+-- Admin receives every current permission.
+INSERT IGNORE INTO role_permissions (role_id, permission_id)
+SELECT r.id, p.id
+FROM roles r CROSS JOIN permissions p
+WHERE r.name = 'admin';
+
+-- Manager can operate the equipment application, but cannot administer users.
+INSERT IGNORE INTO role_permissions (role_id, permission_id)
+SELECT r.id, p.id
+FROM roles r
+JOIN permissions p ON p.permission_key IN (
+    'dashboard.view',
+    'devices.view', 'devices.create',
+    'equipment.view', 'equipment.create',
+    'logs.view', 'logs.create',
+    'analytics.view'
+)
+WHERE r.name = 'manager';
+
+-- Viewer has read-only page access.
+INSERT IGNORE INTO role_permissions (role_id, permission_id)
+SELECT r.id, p.id
+FROM roles r
+JOIN permissions p ON p.permission_key IN (
+    'dashboard.view', 'devices.view', 'equipment.view', 'logs.view', 'analytics.view'
+)
+WHERE r.name = 'viewer';
+
+-- Add the new fields to the existing users table. Run these ALTER statements once.
+ALTER TABLE users
+    ADD COLUMN role_id INT NULL AFTER password_hash,
+    ADD COLUMN is_active TINYINT(1) NOT NULL DEFAULT 1 AFTER role_id,
+    ADD COLUMN last_login_at DATETIME NULL AFTER created_at,
+    ADD INDEX idx_users_role_id (role_id),
+    ADD INDEX idx_users_active (is_active);
+
+-- Existing accounts become viewers unless explicitly bootstrapped below.
+UPDATE users
+SET role_id = (SELECT id FROM roles WHERE name = 'viewer' LIMIT 1)
+WHERE role_id IS NULL;
+
+-- Bootstrap the known administrator shown in the supplied users screenshot.
+-- Change the email if the intended initial administrator uses another account.
+UPDATE users
+SET role_id = (SELECT id FROM roles WHERE name = 'admin' LIMIT 1)
+WHERE LOWER(email) = LOWER('admin@gmail.com');
+
+ALTER TABLE users
+    MODIFY COLUMN role_id INT NOT NULL,
+    ADD CONSTRAINT fk_users_role FOREIGN KEY (role_id) REFERENCES roles(id);
+
+CREATE TABLE IF NOT EXISTS user_admin_audit (
+    audit_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    actor_user_id INT NOT NULL,
+    target_user_id INT NULL,
+    action VARCHAR(60) NOT NULL,
+    old_value TEXT NULL,
+    new_value TEXT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_user_admin_audit_created (created_at),
+    INDEX idx_user_admin_audit_target (target_user_id, created_at)
+) ENGINE=InnoDB;
+
+-- Verify bootstrap and assigned roles.
+SELECT u.id, u.name, u.email, r.name AS role, u.is_active, u.created_at
+FROM users u JOIN roles r ON r.id = u.role_id
+ORDER BY u.id;
+
+UPDATE users
+SET role_id = (
+    SELECT id
+    FROM roles
+    WHERE name = 'admin'
+    LIMIT 1
+)
+WHERE id = 2;
+
+SELECT
+    u.id,
+    u.name,
+    u.email,
+    r.name AS role,
+    u.is_active,
+    u.last_login_at
+FROM users u
+JOIN roles r
+    ON u.role_id = r.id
+ORDER BY u.id;
+
+SELECT
+    r.name AS role_name,
+    p.permission_key,
+    p.description
+FROM role_permissions rp
+JOIN roles r
+    ON rp.role_id = r.id
+JOIN permissions p
+    ON rp.permission_id = p.id
+ORDER BY r.name, p.permission_key;
+
+
+USE react_demo_sql;
+
+CREATE TABLE IF NOT EXISTS user_admin_audit (
+    audit_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    actor_user_id INT NOT NULL,
+    target_user_id INT NULL,
+    action VARCHAR(60) NOT NULL,
+    old_value TEXT NULL,
+    new_value TEXT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    PRIMARY KEY (audit_id),
+    INDEX idx_user_admin_audit_created (created_at),
+    INDEX idx_user_admin_audit_target (target_user_id, created_at)
+) ENGINE=InnoDB;
+
+SHOW TABLES LIKE 'user_admin_audit';
+
+DESCRIBE user_admin_audit;
+
+SELECT *
+FROM user_admin_audit
+ORDER BY audit_id DESC
+LIMIT 20;
+
+USE react_demo_sql;
+
+SELECT id, name, description FROM roles ORDER BY id;
+
+SELECT
+    u.id,
+    u.name,
+    u.email,
+    u.role_id,
+    r.name AS role_name,
+    u.is_active,
+    u.created_at,
+    u.last_login_at
+FROM users AS u
+LEFT JOIN roles AS r ON r.id = u.role_id
+ORDER BY u.id;
+
+SELECT COUNT(*) AS users_without_role
+FROM users
+WHERE role_id IS NULL;
+
+UPDATE users AS u
+JOIN roles AS r ON r.name = 'viewer'
+SET u.role_id = r.id
+WHERE u.role_id IS NULL AND u.id > 0;
+
+
+SHOW TABLES LIKE 'user_admin_audit';
+SHOW COLUMNS FROM users LIKE 'last_login_at';
